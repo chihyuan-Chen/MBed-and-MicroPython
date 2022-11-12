@@ -1,0 +1,291 @@
+
+/* 
+ * MIT License
+ *
+ * Copyright (c) 2022 CoretronicMEMS
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+*/
+
+#include "mbed.h"
+#include "mbed_bme680.h"
+#include "USBSerial.h"
+#include "SensorHub.h"
+#include "ADS131E.h"
+#include "global.h"
+#include "NuSDBlockDevice.h"
+#include "FATFileSystem.h"
+#include "DebounceIn.h"
+#include "lightEffect.hpp"
+//#include "drivers/UnbufferedSerial.h"
+#include "drivers/BufferedSerial.h"
+// #include <stdlib.h>
+// #include <stdio.h>
+
+
+using namespace CMC;
+
+SensorHub sensorHub;
+LightEffect led_r(LED_RED);
+FlashLED led_g(LED_GREEN);
+FlashLED led_b(LED_BLUE);
+DebounceIn sw2(SW2, PullUp);
+DebounceIn sw3_2(SW3_2);
+DebounceIn sw3_3(SW3_3);
+DebounceIn sw3_4(SW3_4);
+USBSerial serial(false);
+// BufferedSerial device(MIKOR_TX, MIKOR_RX, 9600);//***********************
+// BufferedSerial device_1(CONSOLE_TX, CONSOLE_RX, 115200);//*****************
+// char buffer[6];//******************************
+EventFlags mainEvent;
+char serialRxBuf[100];
+uint serialRxLen = 0;
+
+// void BufferReceived();//**************************
+void SW2PressISR();
+void SW3_ISR();
+void SwitchChanged();
+void SerialReceiveISR();
+void onSerialReceived();
+void CmdHandler();
+int GetSwitchSelect();
+
+
+#define SW2_EVENT       0x8000
+#define SW3_EVENT       0x4000
+#define UART_EVENT      0x2000
+    
+
+
+int main()
+{
+    // FILE *fpt = fopen("MyFile.csv", "w+");
+    // fprintf(fpt,"Gy\n");  
+    //int i = 0;
+    //char buffer[5] = {};//0xff
+    printf("\nMbed OS version - %d.%d.%d\n\n", MBED_MAJOR_VERSION, MBED_MINOR_VERSION, MBED_PATCH_VERSION);
+
+    serial.connect();
+    serial.attach(SerialReceiveISR);
+
+    sw2.fall(SW2PressISR);
+    sw3_2.fall(SW3_ISR);
+    sw3_2.rise(SW3_ISR);
+    sw3_3.fall(SW3_ISR);
+    sw3_3.rise(SW3_ISR);
+    sw3_4.fall(SW3_ISR);
+    sw3_4.rise(SW3_ISR);
+
+    sensorHub.Initial();
+    sensorHub.SelectSensor((SensorType)GetSwitchSelect());
+    sensorHub.Start();
+
+    led_r.Period(2);
+    led_r.On();
+    while (1)
+    {   
+        uint flags = mainEvent.wait_any(0xFFFF, 1000);
+    
+        if (!(flags & osFlagsError))
+        {
+            if (flags & SW3_EVENT)
+                SwitchChanged();
+            if (flags & SW2_EVENT)
+                sensorHub.ButtonPress();
+            if (flags & UART_EVENT)
+                onSerialReceived();
+        }
+        else if (flags == osFlagsErrorTimeout) // No event
+        {
+        }
+        
+        /*
+        if(!device.readable())
+            return 0;
+        else if(device.readable())
+        {
+            device.read(&buffer, sizeof(buffer));
+            printf("I got '%s'\n", buffer);
+        }
+        */
+        // if(device.readable())
+        // {
+        //     device.read(&buffer, sizeof(buffer));
+        //     if(buffer[sizeof(buffer)-1] == '\n')
+        //         printf("I got '%s'\n", buffer);
+        // }
+
+
+        // if(device.readable())
+        // {
+        //     device.read(&buffer, sizeof(buffer));
+        //     if(buffer[sizeof(buffer)-1] == '\n')
+        //     {   
+        //         buffer[sizeof(buffer)-1] = 0;
+        //         float_t j = atof(buffer);
+        //         printf("I got %s\n", buffer);
+        //         printf("D got %f\n", j);
+        //         //fprintf(fpt,"%s\n", buffer);
+        //     }
+        // }   
+
+
+        // BufferReceived();//*********************************************
+        // if (device.readable())
+        // {
+            //int flag = 0;
+
+            // device.read(&buffer, 6);
+            // for(int i=0; i < 5; i++)
+            // {
+            //     if ((buffer[i]!=0) || (buffer!="-0-0") || (buffer!="-00") || (buffer!="-0.0") || (buffer!="0."))
+            //         flag = 1;                                                                      
+            // }
+            // if (flag == 1)
+            //     printf("I got '%s'\n", buffer);
+
+            // char* str = (char* )malloc(sizeof(char)*n);
+            // str = buffer;
+            // printf("I got '%s'\n", str);
+        // }
+        //sprintf(buffer, "%d\n\r", &buffer);
+        // if(buffer!=0)
+        //     printf("Hello\n");
+        // for(int i=0;i<20;i++)
+        //     printf("I got '%d'\n", buffer[i]);
+
+    }
+    //fclose(fpt);
+    printf("Complete!!\n");
+    return 0;
+}
+
+int GetSwitchSelect()
+{
+    int sw_sel;
+    sw_sel = (sw3_2<<0) | (sw3_3<<1) | (sw3_4<<2);
+    return sw_sel;
+}
+
+void SW2PressISR()
+{
+    mainEvent.set(SW2_EVENT);
+}
+
+void SW3_ISR()
+{
+    mainEvent.set(SW3_EVENT);
+}
+
+void SwitchChanged()
+{
+    SensorType newSel = (SensorType)GetSwitchSelect();
+    sensorHub.SelectSensor(newSel);
+}
+
+void SerialReceiveISR()
+{
+    mainEvent.set(UART_EVENT);
+}
+/*
+void BufferReceived()
+{
+    if(!device.readable())
+        return;
+    else 
+    {
+        device.read(&buffer, sizeof(buffer));
+        if(buffer[sizeof(buffer)-1] == '\n')
+        {   
+            buffer[sizeof(buffer)-1] = '0';// Test
+            char str[6];
+            strcpy(str, buffer);
+            device_1.write(str, sizeof(str));
+            //printf("%s\n", str);
+
+            //printf("%s", buffer);// Test
+
+            //buffer[sizeof(buffer)-1] = '0';
+            //buffer[sizeof(buffer)-1] = '\n\r';
+            //device_1.write(&buffer, sizeof(buffer));
+            // printf("%s", buffer);
+        }
+    }
+}
+*/
+void onSerialReceived()
+{
+    if(!serial.readable())
+        return;
+
+    led_g.Flash();
+    while(serial.readable())
+    {
+        if(serialRxLen < sizeof(serialRxBuf)-1)
+            serialRxLen += serial.read(serialRxBuf + serialRxLen, 1);
+    }
+    if(serialRxBuf[serialRxLen-1] == '\n' || serialRxLen == sizeof(serialRxBuf)-1 || strncmp(serialRxBuf, "connect", 7) == 0)
+    {
+        serialRxBuf[serialRxLen] = 0;
+        CmdHandler();
+        serialRxLen = 0;
+    }
+}
+
+void CmdHandler()
+{
+    printf("%s", serialRxBuf);
+
+    if (strncmp(serialRxBuf, "connect", 7) == 0)
+    {
+        sensorHub.DclConnect(DCL_CONNECTED);
+    }
+    else if (strncmp(serialRxBuf, "disconnect", 10) == 0)
+    {
+        sensorHub.DclConnect(DCL_DISCONNECT);
+    }
+    else if (strncmp(serialRxBuf, "list", 4) == 0)
+    {
+        sensorHub.JsonGenerator();
+    }
+    else if (strncmp(serialRxBuf, "test", 4) == 0)
+    {
+        sensorHub.Control(SENSOR_TEST, SENSOR_CTRL_START);
+    }
+    else if (strncmp(serialRxBuf, "stop", 4) == 0)
+    {
+        sensorHub.DclConnect(DCL_DISCONNECT);
+    }
+    else if (strncmp(serialRxBuf, "sensor=", 7) == 0)
+    {
+        int id = atoi(serialRxBuf+7);
+        if(id >= 0 && id < SENSOR_MAX)
+        {
+            sensorHub.SelectSensor((SensorType)id);
+        }
+    }
+    else if (strncmp(serialRxBuf, "odr=", 4) == 0)
+    {
+        int odr = atoi(serialRxBuf+4);
+        if(odr >= 0 && odr < 999999)
+        {
+            sensorHub.Control(sensorHub.SelectedSensor(), SENSOR_CTRL_SET_ODR, odr);
+        }
+    }
+}
